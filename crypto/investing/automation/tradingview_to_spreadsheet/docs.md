@@ -144,7 +144,7 @@ You can use AI tools or resources to help you adjust this for your local time.
 
 ## Google Spreadhsheet code
 
-```
+```javascript
 // Mapping of indicator names to their summary cell and update row
 var indicatorToCell = {
   "Indicator1": { summary_cell: "I5", update_row: 2 },
