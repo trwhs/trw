@@ -1,4 +1,12 @@
-// Mapping of indicator names to their summary cell and update row
+const SHEET_ID = "1qn6R5Md6NLS3qPtBhzvQU8glAiCPu2n5BwplZHz2N7w";
+
+const spreadsheet = SpreadsheetApp.openById(SHEET_ID);
+
+const logSheet = spreadsheet.getSheetByName("Logs") || spreadsheet.insertSheet("Logs");
+
+const webhookSheet = spreadsheet.getSheetByName("Automated TV Webhook");
+const summarySheet = spreadsheet.getSheetByName("SDCA v2");
+
 var indicatorToCell = {
   "MVRV": { summary_cell: "I5", update_row: 2 },
   "BMO": { summary_cell: "I6", update_row: 3 },
@@ -18,70 +26,151 @@ var indicatorToCell = {
   "TimeDifferential": { summary_cell: "I23", update_row: 17 },
 };
 
+function logEvent(message, details) {
+  // Insert a new row at the top of the logs sheet
+  logSheet.insertRowBefore(1);
+  
+  // Write the data to the new top row
+  // Customize the columns as needed
+  logSheet.getRange(1, 1, 1, 3).setValues([[
+    new Date(),    // Timestamp
+    message,       // Log message 
+    JSON.stringify(details) // Details (converted to string)
+  ]]);
+}
+
+function getBMOValue() {
+  try {
+    const spreadsheet = SpreadsheetApp.openById(SHEET_ID);
+    const webhookSheet = spreadsheet.getSheetByName("Automated TV Webhook");
+    
+    // Check last update time from the sheet
+    const lastUpdateTime = webhookSheet.getRange(indicatorToCell["BMO"].update_row, 1).getValue();
+    const currentTime = new Date();
+    
+    // If lastUpdateTime exists and it's been less than a minute, skip update
+    if (lastUpdateTime && typeof lastUpdateTime.getTime === 'function') {
+      const timeDiff = (currentTime - lastUpdateTime) / 1000;
+      if (timeDiff < 60) {
+        return null;
+      }
+    }
+
+    const timestamp = currentTime.getTime();
+    const url = `https://woocharts.com/bitcoin-macro-oscillator/data/chart.json?${timestamp}`;
+    
+    const response = UrlFetchApp.fetch(url, {
+      'headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        'Referer': 'https://woocharts.com/bitcoin-macro-oscillator/'
+      },
+      'muteHttpExceptions': true
+    });
+    
+    const data = JSON.parse(response.getContentText());
+    if ('index' in data && 'y' in data['index']) {
+      var bmo = data['index']['y'][data['index']['y'].length - 1];
+      var formattedBmoValue = Math.round(bmo * 100) / 100;
+      return formattedBmoValue;
+    }
+    return null;
+  } catch (error) {
+    logEvent("Error fetching BMO value", {
+      error: error,
+    });
+    return null;
+  }
+}
+
+// Common function to update any indicator's row and summary
+function updateIndicator(sheet, summarySheet, indicator, todays_value, sd_minus_2, sd_plus_2, formattedDate) {
+  const cellInfo = indicatorToCell[indicator];
+  if (!cellInfo) return false;
+
+  const mean = (sd_minus_2 + sd_plus_2) / 2;
+  const standardDeviation = (sd_plus_2 - sd_minus_2) / 4;
+  const zScore = Math.round((todays_value - mean) / standardDeviation * 100) / 100;
+
+  // Update the row
+  sheet.getRange(cellInfo.update_row, 1).setValue(formattedDate);
+  sheet.getRange(cellInfo.update_row, 2).setValue(indicator);
+  sheet.getRange(cellInfo.update_row, 3).setValue(sd_minus_2);
+  sheet.getRange(cellInfo.update_row, 4).setValue(sd_plus_2);
+  sheet.getRange(cellInfo.update_row, 5).setValue(todays_value);
+  sheet.getRange(cellInfo.update_row, 6).setValue(mean);
+  sheet.getRange(cellInfo.update_row, 7).setValue(standardDeviation);
+  sheet.getRange(cellInfo.update_row, 8).setValue(zScore);
+
+  // Update summary
+  summarySheet.getRange(cellInfo.summary_cell).setValue(zScore);
+  return true;
+}
+
+
 function doPost(e) {
   try {
-    // Parse the JSON data from the request body
+
+    logEvent("Request received", {
+      contents: e.postData.contents,
+    });
+    
     var data = JSON.parse(e.postData.contents);
 
-    // Validate the required keys in the JSON data
     if (!data.indicator || data.sd_minus_2 === undefined || data.sd_plus_2 === undefined || data.todays_value === undefined) {
-      return ContentService.createTextOutput(JSON.stringify({ 'result': 'error', 'message': 'Missing required keys in JSON data' }))
-                           .setMimeType(ContentService.MimeType.JSON);
+      logEvent("Error: Missing required keys in JSON data", {
+        contents: e.postData.contents,
+      });
+      return;
     }
 
-    // Convert string decimals to numbers using parseFloat
-    var sd_minus_2 = parseFloat(data.sd_minus_2);
-    var sd_plus_2 = parseFloat(data.sd_plus_2);
-    var todays_value = parseFloat(data.todays_value);
-
-    // Get the current date and time in Riga/Europe time zone
     var currentDate = new Date();
     var formattedDate = Utilities.formatDate(currentDate, "Europe/Riga", "yyyy-MM-dd HH:mm:ss");
+    
+    try {
+        // Process the original indicator data
+        const sd_minus_2 = parseFloat(data.sd_minus_2);
+        const sd_plus_2 = parseFloat(data.sd_plus_2);
+        const todays_value = parseFloat(data.todays_value);
 
-    // Calculate Mean, Standard Deviation, and Z-Score
-    var mean = (sd_minus_2 + sd_plus_2) / 2;
-    var standardDeviation = (sd_plus_2 - sd_minus_2) / 4;
-    var zScore = (todays_value - mean) / standardDeviation;
+        var mean = (sd_minus_2 + sd_plus_2) / 2;
+        var standardDeviation = (sd_plus_2 - sd_minus_2) / 4;
+        var zScore = (todays_value - mean) / standardDeviation;
 
-    // Round the Z-Score to two decimal places
-    zScore = Math.round(zScore * 100) / 100;
+        zScore = Math.round(zScore * 100) / 100;
 
-    // Open the spreadsheet
-    var spreadsheet = SpreadsheetApp.openById("1qn6R5Md6NLS3qPtBhzvQU8glAiCPu2n5BwplZHz2N7w");
-    var sheet = spreadsheet.getSheetByName("Automated TV Webhook");
-
-    // Get the specific row and summary cell for the current indicator
-    var cellInfo = indicatorToCell[data.indicator];
-
-    if (cellInfo) {
-      // Use the update_row for updating values instead of adding a new row
-      var updateRow = cellInfo.update_row;
-
-      // Set values in the specified row, starting from the first column (A)
-      sheet.getRange(updateRow, 1).setValue(formattedDate);        // Set current date and time
-      sheet.getRange(updateRow, 2).setValue(data.indicator);
-      sheet.getRange(updateRow, 3).setValue(sd_minus_2);           // Use converted decimal values
-      sheet.getRange(updateRow, 4).setValue(sd_plus_2);            // Use converted decimal values
-      sheet.getRange(updateRow, 5).setValue(todays_value);         // Use converted decimal values
-      sheet.getRange(updateRow, 6).setValue(mean);                 // Insert calculated Mean
-      sheet.getRange(updateRow, 7).setValue(standardDeviation);    // Insert calculated Standard Deviation
-      sheet.getRange(updateRow, 8).setValue(zScore);               // Insert rounded Z-Score
-
-      // Update the summary cell for Z-score
-      var summarySheet = spreadsheet.getSheetByName("SDCA v2");
-      summarySheet.getRange(cellInfo.summary_cell).setValue(zScore);
-    } else {
-      // Handle case where indicator is not found in the mapping
-      return ContentService.createTextOutput(JSON.stringify({ 'result': 'error', 'message': 'Indicator not found in mapping' }))
-                           .setMimeType(ContentService.MimeType.JSON);
+    } catch (error) {
+        logSheet.insertRowBefore(1);
+        logSheet.getRange(1, 1, 1, 3).setValues([[
+            new Date(), 
+            'Z-Score Calculation Error', 
+            error.message
+        ]]);
     }
 
-    // Return success message
+    const bmoValue = getBMOValue();
+
+    logEvent("BMO", {
+      value: bmoValue,
+    });
+
+    if (bmoValue !== null) {
+      updateIndicator(webhookSheet, summarySheet, "BMO", bmoValue, 1.87, -1.8, formattedDate);
+    }
+
+    var update = updateIndicator(sheet, summarySheet, data.indicator, todays_value, sd_minus_2, sd_plus_2, formattedDate);
+
+    if (!update) {
+      logEvent("update results", {
+        value: "failure",
+      });
+      return;
+    }
+
     return ContentService.createTextOutput(JSON.stringify({ 'result': 'success' }))
                          .setMimeType(ContentService.MimeType.JSON);
 
   } catch (error) {
-    // Return error message if something goes wrong
     return ContentService.createTextOutput(JSON.stringify({ 'result': 'error', 'message': error.toString() }))
                          .setMimeType(ContentService.MimeType.JSON);
   }
